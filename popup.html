@@ -48,7 +48,6 @@
         background: #e5e5e5;
         margin: 4px 0 12px;
       }
-      #status,
       #mute-status {
         margin: 4px 0 0;
         font-size: 12px;
@@ -136,6 +135,39 @@
         color: #666;
         font-size: 11px;
       }
+      .whitelist-section {
+        margin: 2px 0 0;
+      }
+      .whitelist-section label {
+        display: block;
+        font-weight: 600;
+        margin-bottom: 4px;
+      }
+      .whitelist-section small {
+        display: block;
+        font-weight: 400;
+        color: #666;
+        font-size: 11px;
+        margin-top: 2px;
+      }
+      #commentWhitelist {
+        box-sizing: border-box;
+        width: 100%;
+        min-height: 64px;
+        margin-top: 6px;
+        padding: 6px 8px;
+        border: 1px solid #ccc;
+        border-radius: 6px;
+        font: inherit;
+        font-size: 12px;
+        line-height: 1.4;
+        color: #222;
+        resize: vertical;
+      }
+      #commentWhitelist:focus {
+        outline: none;
+        border-color: #1083fe;
+      }
     </style>
   </head>
   <body>
@@ -161,6 +193,13 @@
       </span>
       <input type="checkbox" id="hideBookmarks" checked />
     </label>
+    <label class="toggle-row">
+      <span>
+        Comments
+        <small>Reply counts, buttons stay usable</small>
+      </span>
+      <input type="checkbox" id="hideComments" checked />
+    </label>
     <div class="divider"></div>
     <label class="toggle-row">
       <span>
@@ -169,7 +208,28 @@
       </span>
       <input type="checkbox" id="showOwnOnly" />
     </label>
-    <p id="status" role="status"></p>
+    <div class="divider"></div>
+    <div class="whitelist-section">
+      <label for="commentWhitelist">
+        Comment count whitelist
+        <small>One handle per line (e.g. alice.bsky.social). DIDs also work. Whitelisted users keep their reply counts.</small>
+      </label>
+      <textarea
+        id="commentWhitelist"
+        rows="3"
+        spellcheck="false"
+        placeholder="alice.bsky.social&#10;did:plc:..."
+      ></textarea>
+    </div>
+    <div class="divider"></div>
+    <h1>UI improvement</h1>
+    <label class="toggle-row">
+      <span>
+        Quick reactions
+        <small>Show more and Show less on For You</small>
+      </span>
+      <input type="checkbox" id="quickReactions" />
+    </label>
     <div class="divider"></div>
     <div class="section-head">
       <h1>Muted words</h1>
@@ -198,6 +258,13 @@
         </svg>
       </button>
     </div>
+    <label class="toggle-row">
+      <span>
+        Auto-renew expired
+        <small>Clear expiry dates automatically</small>
+      </span>
+      <input type="checkbox" id="autoRenewMutes" checked />
+    </label>
     <div class="mute-head">
       <span id="expired-count">— expired</span>
       <div class="mute-actions" id="mute-actions" hidden>

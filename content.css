@@ -62,6 +62,137 @@ html.quietsky-hide-bookmarks.quietsky-show-own-only
   display: inline-block !important;
 }
 
+/*
+ * Reply (comment) counts.
+ *
+ * Bluesky web renders the count as a react-native-web <Text>, i.e.
+ * `<div dir="auto">12</div>`, which is the ONLY [dir="auto"] direct child of
+ * [data-testid="replyBtn"] (the bubble icon is an <svg>). The count has NO
+ * data-testid of its own. We therefore hide that structural child directly —
+ * this works immediately with zero JS/mutation-observer dependency, which the
+ * previous JS-only .quietsky-reply-count tagging approach lacked.
+ *
+ * We also keep .quietsky-reply-count (tagged by content.js) as a fallback that
+ * covers layout variants without dir="auto". In both cases only the count is
+ * hidden: the button and its icon stay fully clickable and the row keeps its
+ * layout.
+ */
+html.quietsky-hide-comments [data-testid="replyBtn"] > [dir="auto"],
+html.quietsky-hide-comments .quietsky-reply-count {
+  display: none !important;
+}
+
+/* Comment whitelist: always keep reply counts on these authors. */
+html.quietsky-hide-comments
+  .quietsky-comment-whitelisted
+  [data-testid="replyBtn"]
+  > [dir="auto"],
+html.quietsky-hide-comments
+  .quietsky-comment-whitelisted
+  .quietsky-reply-count {
+  display: inline-block !important;
+}
+
+/* Show mine only also exempts your own posts from comment-count hiding. */
+html.quietsky-hide-comments.quietsky-show-own-only
+  .quietsky-own-post
+  [data-testid="replyBtn"]
+  > [dir="auto"],
+html.quietsky-hide-comments.quietsky-show-own-only
+  .quietsky-own-post
+  .quietsky-reply-count {
+  display: inline-block !important;
+}
+
+/* For You show-more / show-less, on the name / handle / time line */
+.quietsky-feedback-host {
+  position: relative !important;
+}
+
+.quietsky-feedback-meta {
+  box-sizing: border-box;
+  display: flex !important;
+  align-items: center !important;
+  width: 100%;
+}
+
+.quietsky-feedback-meta > :not(.quietsky-feedback) {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.quietsky-feedback {
+  position: static;
+  z-index: 2;
+  display: flex;
+  flex: none;
+  align-items: center;
+  align-self: center;
+  margin-left: auto;
+  gap: 8px;
+}
+
+.quietsky-feedback-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.15em;
+  height: 1.15em;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  line-height: 0;
+  opacity: 0.55;
+  cursor: pointer;
+}
+
+.quietsky-feedback-btn svg {
+  display: block;
+  width: 1em;
+  height: 1em;
+}
+
+.quietsky-feedback-btn:hover {
+  opacity: 0.9;
+  background: rgba(127, 127, 127, 0.12);
+}
+
+.quietsky-feedback-btn[aria-pressed='true'] {
+  color: #1083fe;
+  opacity: 1;
+}
+
+.quietsky-feedback-btn:disabled {
+  cursor: default;
+}
+
+.quietsky-feedback-note {
+  display: none;
+  margin: 0;
+  padding: 14px 16px;
+  color: inherit;
+  opacity: 0.7;
+  font: 500 14px/1.4 system-ui, sans-serif;
+}
+
+.quietsky-feedback-less > :not(.quietsky-feedback-note) {
+  display: none !important;
+}
+
+.quietsky-feedback-less > .quietsky-feedback-note {
+  display: block !important;
+}
+
+/* Hide the post menu and its popper while a chevron drives Show more / Show less. */
+html.quietsky-feedback-silent [role='menu'].dropdown-menu-transform-origin,
+html.quietsky-feedback-silent div[style*='--radix-popper-transform-origin'] {
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
 #quietsky-mute-notice {
   position: fixed;
   top: 56px;

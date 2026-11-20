@@ -4,7 +4,11 @@
   // Local preview only. Must stay false before a release.
   const TEST_MUTE_NOTICE = false;
   const TEST_NOTICE_KEY = 'quietsky-test-fade-3s';
+  const NOTICE_SHOWN_KEY = 'quietsky-expired-notice-shown';
   const NOTICE_MS = 3000;
+  const AUTO_RENEW_KEY = 'autoRenewMutes';
+
+  let autoRenewMutes = true;
 
   const STORAGE_KEY = 'BSKY_STORAGE';
   const SCAN_KEY = 'mutedWordScan';
@@ -194,7 +198,34 @@
 
   let noticeTimer = null;
 
-  function showMuteNotice(count) {
+  async function loadAutoRenew() {
+    if (!contextAlive()) return;
+    try {
+      const data = await chrome.storage.sync.get({ [AUTO_RENEW_KEY]: true });
+      autoRenewMutes = data[AUTO_RENEW_KEY] !== false;
+    } catch (err) {
+      if (!isInvalidated(err)) throw err;
+    }
+  }
+
+  function shownExpiredCount() {
+    try {
+      const prev = Number(sessionStorage.getItem(NOTICE_SHOWN_KEY));
+      return Number.isFinite(prev) ? prev : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  function markExpiredNoticeShown(count) {
+    try {
+      sessionStorage.setItem(NOTICE_SHOWN_KEY, String(count));
+    } catch {
+      /* ignore quota / private mode */
+    }
+  }
+
+  function showMuteNotice(count, options = {}) {
     const n = Number(count) || 0;
     if (n < 1) return;
     const noun = n === 1 ? 'word' : 'words';
@@ -207,7 +238,10 @@
     const bar = document.createElement('div');
     bar.id = 'quietsky-mute-notice';
     bar.style.setProperty('--quietsky-notice-ms', `${NOTICE_MS}ms`);
-    bar.textContent = `${n} muted ${noun} expired. Renewed.`;
+    bar.textContent =
+      options.renewed !== false
+        ? `${n} muted ${noun} expired. Renewed.`
+        : `${n} muted ${noun} expired.`;
     (document.body || document.documentElement).appendChild(bar);
     noticeTimer = setTimeout(() => {
       bar.remove();
@@ -220,8 +254,15 @@
       const result = await scan();
       if (result?.expired?.length) {
         const count = result.expired.length;
-        const renewed = await renewAll();
-        if (!renewed?.error) showMuteNotice(count);
+        if (autoRenewMutes) {
+          const renewed = await renewAll();
+          if (!renewed?.error) showMuteNotice(count, { renewed: true });
+          return;
+        }
+        if (count > shownExpiredCount()) {
+          showMuteNotice(count, { renewed: false });
+          markExpiredNoticeShown(count);
+        }
         return;
       }
       if (TEST_MUTE_NOTICE && !sessionStorage.getItem(TEST_NOTICE_KEY)) {
@@ -235,9 +276,20 @@
     }
   }
 
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'sync' || !changes[AUTO_RENEW_KEY]) return;
+    autoRenewMutes = changes[AUTO_RENEW_KEY].newValue !== false;
+  });
+
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') checkAndRenew();
   });
 
-  checkAndRenew();
+  loadAutoRenew()
+    .then(() => checkAndRenew())
+    .catch((err) => {
+      if (!isInvalidated(err)) {
+        console.warn('Quietsky mute check failed', err);
+      }
+    });
 })();

@@ -5,15 +5,25 @@
     hideLikes: true,
     hideReposts: true,
     hideBookmarks: true,
+    hideComments: true,
     showOwnOnly: false,
+    commentWhitelist: [],
   };
 
-  const KEYS = ['hideLikes', 'hideReposts', 'hideBookmarks', 'showOwnOnly'];
+  const KEYS = [
+    'hideLikes',
+    'hideReposts',
+    'hideBookmarks',
+    'hideComments',
+    'showOwnOnly',
+    'commentWhitelist',
+  ];
 
   const CLASS_MAP = {
     hideLikes: 'quietsky-hide-likes',
     hideReposts: 'quietsky-hide-reposts',
     hideBookmarks: 'quietsky-hide-bookmarks',
+    hideComments: 'quietsky-hide-comments',
     showOwnOnly: 'quietsky-show-own-only',
   };
 
@@ -21,14 +31,50 @@
     '[data-testid^="feedItem-by-"], [data-testid^="postThreadItem-by-"]';
   const POST_CLASS = 'quietsky-post';
   const OWN_CLASS = 'quietsky-own-post';
+  // Author is on the comment-count whitelist (comment count only, never likes etc.).
+  const WHITELIST_CLASS = 'quietsky-comment-whitelisted';
+  // Tag applied to the reply-count text element inside [data-testid="replyBtn"].
+  const REPLY_COUNT_CLASS = 'quietsky-reply-count';
+  const REPLY_BTN_SELECTOR = '[data-testid="replyBtn"]';
+  /**
+   * Bluesky web renders the reply count with a react-native-web <Text>, i.e.
+   * `<div dir="auto">12</div>`, as the ONLY [dir="auto"] direct child of
+   * [data-testid="replyBtn"] (the icon is an <svg>). Verified against the
+   * deployed web bundle: PostControls passes `testID="replyBtn"` but the
+   * count's PostControlButtonText has no testID at all. This structural hook
+   * lets CSS hide the count directly, without relying on JS text matching.
+   */
+  const REPLY_COUNT_STRUCTURAL_SELECTOR = '[data-testid="replyBtn"] > [dir="auto"]';
+  // Compact counts from useFormatPostStatCount: "12", "1.2K", "1,234",
+  // and locale variants such as "1,2 mil". Tolerates a short letter suffix.
+  const COUNT_TEXT_RE = /^\d[\d.,]*(?:\s*[\p{L}.]{1,10})?$/u;
   const BSKY_STORAGE_KEY = 'BSKY_STORAGE';
+  // Fallback sweep catches virtualized-list recycling and text-only updates
+  // that a childList-only MutationObserver cannot see.
+  const SWEEP_INTERVAL_MS = 2000;
 
   /** @type {Set<string>} */
   let selfActors = new Set();
+  /** @type {Set<string>} */
+  let commentWhitelist = new Set();
   let showOwnOnly = false;
+  let hideComments = true;
   let observerStarted = false;
   /** @type {ReturnType<typeof setInterval> | null} */
   let retryTimer = null;
+  /** @type {ReturnType<typeof setInterval> | null} */
+  let sweepTimer = null;
+  let diagnosticLogged = false;
+  const diagStats = { buttons: 0, marked: 0, structural: 0 };
+
+  /**
+   * Post marking is needed for showOwnOnly (own-post restore for the existing
+   * count toggles) and, independently, for hideComments (reply-count tagging
+   * and whitelist restore). Either one active keeps the observer/marking alive.
+   */
+  function isMarkingActive() {
+    return showOwnOnly || hideComments;
+  }
 
   function applyClasses(settings) {
     const root = document.documentElement;
@@ -55,28 +101,52 @@
     return s.replace(/^\/profile\//, '').split(/[/?#]/)[0] || null;
   }
 
-  function addSelfActor(value) {
+  /**
+   * Store an actor in both its short and full-handle forms so that
+   * `alice` and `alice.bsky.social` compare equal. DIDs are stored verbatim.
+   */
+  function addActorToSet(set, value) {
     const key = normalizeActor(value);
     if (!key) return;
-    selfActors.add(key);
+    set.add(key);
     if (!key.startsWith('did:') && key.endsWith('.bsky.social')) {
-      selfActors.add(key.slice(0, -'.bsky.social'.length));
+      set.add(key.slice(0, -'.bsky.social'.length));
     } else if (!key.startsWith('did:') && !key.includes('.')) {
-      selfActors.add(`${key}.bsky.social`);
+      set.add(`${key}.bsky.social`);
     }
   }
 
-  function isSelfActor(actor) {
+  function addSelfActor(value) {
+    addActorToSet(selfActors, value);
+  }
+
+  function isActorInSet(set, actor) {
     const key = normalizeActor(actor);
-    if (!key || selfActors.size === 0) return false;
-    if (selfActors.has(key)) return true;
+    if (!key || set.size === 0) return false;
+    if (set.has(key)) return true;
     if (!key.startsWith('did:')) {
       if (key.endsWith('.bsky.social')) {
-        return selfActors.has(key.slice(0, -'.bsky.social'.length));
+        return set.has(key.slice(0, -'.bsky.social'.length));
       }
-      return selfActors.has(`${key}.bsky.social`);
+      return set.has(`${key}.bsky.social`);
     }
     return false;
+  }
+
+  function isSelfActor(actor) {
+    return isActorInSet(selfActors, actor);
+  }
+
+  function isWhitelistedActor(actor) {
+    return isActorInSet(commentWhitelist, actor);
+  }
+
+  function setCommentWhitelist(list) {
+    commentWhitelist = new Set();
+    if (!Array.isArray(list)) return;
+    for (const entry of list) {
+      addActorToSet(commentWhitelist, entry);
+    }
   }
 
   /**
@@ -217,6 +287,101 @@
     return null;
   }
 
+  /**
+   * Collect the reply buttons relevant to `root` (the root itself, its owner,
+   * or any descendant) without duplicates.
+   * @param {Node} root
+   * @returns {Element[]}
+   */
+  function collectReplyButtons(root) {
+    /** @type {Element[]} */
+    const buttons = [];
+    const add = (btn) => {
+      if (btn && !buttons.includes(btn)) buttons.push(btn);
+    };
+    if (root.nodeType === 1) {
+      if (root.matches?.(REPLY_BTN_SELECTOR)) add(root);
+      add(root.closest?.(REPLY_BTN_SELECTOR));
+    }
+    for (const btn of root.querySelectorAll?.(REPLY_BTN_SELECTOR) || []) {
+      add(btn);
+    }
+    return buttons;
+  }
+
+  /**
+   * Tag reply-count elements so CSS can hide them. Two complementary paths:
+   *
+   * 1. Structural fast path — the RNW <Text> count is the direct
+   *    `[dir="auto"]` child of [data-testid="replyBtn"]. This matches the
+   *    real Bluesky DOM regardless of number formatting or wrapper nesting.
+   * 2. Text fallback — the deepest descendant whose trimmed text looks like
+   *    a compact count, for layout variations that lack dir="auto".
+   *
+   * The button itself is never modified, so it stays fully clickable.
+   * @param {Node} root
+   */
+  function findAndMarkReplyCounts(root) {
+    for (const btn of collectReplyButtons(root)) {
+      // Fast path: direct [dir="auto"] children (RNW Text renders the count).
+      // Skip any that are inside an <svg> just in case.
+      for (const el of btn.querySelectorAll(':scope > [dir="auto"]')) {
+        if (el.closest('svg')) continue;
+        el.classList.add(REPLY_COUNT_CLASS);
+      }
+
+      // Fallback: deepest numeric-text descendant (existing heuristic).
+      for (const el of btn.querySelectorAll('*')) {
+        if (el.classList.contains(REPLY_COUNT_CLASS)) continue;
+        if (el.closest('svg')) continue;
+        const text = (el.textContent || '').trim();
+        if (!text || !COUNT_TEXT_RE.test(text)) continue;
+
+        // Skip wrapper elements whose child already carries the same text.
+        let nested = false;
+        for (const child of el.children) {
+          if ((child.textContent || '').trim() === text) {
+            nested = true;
+            break;
+          }
+        }
+        if (nested) continue;
+
+        el.classList.add(REPLY_COUNT_CLASS);
+      }
+    }
+  }
+
+  /**
+   * One-time, non-UI diagnostic: expose detection counts on <html> as a data
+   * attribute and log a single console line so users can self-check.
+   */
+  function refreshDiagnostic() {
+    if (!hideComments) return;
+    const buttons = document.querySelectorAll(REPLY_BTN_SELECTOR).length;
+    const structural = document.querySelectorAll(REPLY_COUNT_STRUCTURAL_SELECTOR).length;
+    const marked = document.querySelectorAll(`.${REPLY_COUNT_CLASS}`).length;
+    diagStats.buttons = Math.max(diagStats.buttons, buttons);
+    diagStats.structural = Math.max(diagStats.structural, structural);
+    diagStats.marked = Math.max(diagStats.marked, marked);
+    const html = document.documentElement;
+    html.setAttribute(
+      'data-quietsky-replydiag',
+      `hideComments=${hideComments ? 'on' : 'off'} replyBtns=${diagStats.buttons} structuralCounts=${diagStats.structural} markedCounts=${diagStats.marked}`,
+    );
+    if (!diagnosticLogged && diagStats.buttons > 0) {
+      diagnosticLogged = true;
+      console.info(
+        '[Quietsky] reply-count check:',
+        `html.quietsky-hide-comments=${html.classList.contains('quietsky-hide-comments')}`,
+        `replyBtns=${diagStats.buttons}`,
+        `structuralCounts=${diagStats.structural}`,
+        `taggedCounts=${diagStats.marked}`,
+        `(see html[data-quietsky-replydiag])`,
+      );
+    }
+  }
+
   function markPost(el) {
     el.classList.add(POST_CLASS);
     const handle = handleFromTestId(el);
@@ -225,29 +390,46 @@
     const own =
       isSelfActor(handle) || isSelfActor(did) || isSelfActor(authorHref);
     el.classList.toggle(OWN_CLASS, own);
+    // Whitelist is evaluated for every post and only affects reply counts.
+    const whitelisted =
+      isWhitelistedActor(handle) ||
+      isWhitelistedActor(did) ||
+      isWhitelistedActor(authorHref);
+    el.classList.toggle(WHITELIST_CLASS, whitelisted);
   }
 
   function markAllPosts(root = document) {
-    if (!showOwnOnly) return;
-    // Re-read self if still unknown so late BSKY_STORAGE / shell avatar works
-    if (selfActors.size === 0) refreshSelf();
+    if (!isMarkingActive()) return;
+    // Re-read self if still unknown so late BSKY_STORAGE / shell avatar works.
+    if (showOwnOnly && selfActors.size === 0) refreshSelf();
+
+    findAndMarkReplyCounts(root);
+
     for (const el of root.querySelectorAll?.(POST_SELECTOR) || []) {
       markPost(el);
     }
-    if (root.nodeType === 1 && root.matches?.(POST_SELECTOR)) {
-      markPost(root);
+    if (root.nodeType === 1) {
+      if (root.matches?.(POST_SELECTOR)) {
+        markPost(root);
+      } else {
+        const ownerPost = root.closest?.(POST_SELECTOR);
+        if (ownerPost) markPost(ownerPost);
+      }
     }
   }
 
   function clearMarks() {
     for (const el of document.querySelectorAll(`.${POST_CLASS}`)) {
-      el.classList.remove(POST_CLASS, OWN_CLASS);
+      el.classList.remove(POST_CLASS, OWN_CLASS, WHITELIST_CLASS);
+    }
+    for (const el of document.querySelectorAll(`.${REPLY_COUNT_CLASS}`)) {
+      el.classList.remove(REPLY_COUNT_CLASS);
     }
   }
 
   function remarkAll() {
-    if (!showOwnOnly) return;
-    refreshSelf();
+    if (!isMarkingActive()) return;
+    if (showOwnOnly) refreshSelf();
     markAllPosts();
   }
 
@@ -255,22 +437,67 @@
     if (observerStarted) return;
     observerStarted = true;
     const obs = new MutationObserver((mutations) => {
-      if (!showOwnOnly) return;
+      if (!isMarkingActive()) return;
       let needMark = false;
       for (const m of mutations) {
-        for (const node of m.addedNodes) {
-          if (node.nodeType !== 1) continue;
-          needMark = true;
-          markAllPosts(node);
+        if (m.type === 'childList') {
+          for (const node of m.addedNodes) {
+            if (node.nodeType === 1) {
+              // Element subtree — the common React feed-insert path.
+              needMark = true;
+              markAllPosts(node);
+            } else if (node.nodeType === 3) {
+              // Text node inserted later (e.g. React fills count text).
+              const owner = node.parentElement?.closest?.(REPLY_BTN_SELECTOR);
+              if (owner) {
+                needMark = true;
+                markAllPosts(owner);
+              }
+            }
+          }
+        } else if (m.type === 'characterData') {
+          // React may update an existing count via textContent / nodeValue.
+          const owner = m.target.parentElement?.closest?.(REPLY_BTN_SELECTOR);
+          if (owner) {
+            needMark = true;
+            markAllPosts(owner);
+          }
         }
       }
-      // Shell avatar may appear after posts — refresh self occasionally
-      if (needMark && selfActors.size === 0) {
+      // Shell avatar may appear after posts — refresh self occasionally.
+      if (needMark && showOwnOnly && selfActors.size === 0) {
         remarkAll();
       }
     });
     const target = document.body || document.documentElement;
-    obs.observe(target, { childList: true, subtree: true });
+    obs.observe(target, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+    });
+  }
+
+  /** Stop the periodic fallback sweep. */
+  function stopSweep() {
+    if (sweepTimer != null) {
+      clearInterval(sweepTimer);
+      sweepTimer = null;
+    }
+  }
+
+  /**
+   * Periodic safety net: React virtualized lists recycle DOM nodes and can
+   * leave newly-created counts untagged. Re-marking the whole document is
+   * idempotent and cheap enough at this cadence.
+   */
+  function startSweep() {
+    stopSweep();
+    if (!hideComments) return;
+    sweepTimer = setInterval(() => {
+      if (!isMarkingActive()) return;
+      markAllPosts();
+      refreshDiagnostic();
+    }, SWEEP_INTERVAL_MS);
   }
 
   function stopRetry() {
@@ -296,16 +523,35 @@
     const data = await chrome.storage.sync.get(DEFAULTS);
     const settings = { ...DEFAULTS, ...data };
     showOwnOnly = Boolean(settings.showOwnOnly);
+    hideComments = settings.hideComments !== false;
     applyClasses(settings);
+    setCommentWhitelist(settings.commentWhitelist);
 
-    if (showOwnOnly) {
-      refreshSelf();
+    if (isMarkingActive()) {
+      if (showOwnOnly) refreshSelf();
       markAllPosts();
       startObserver();
-      startRetryUntilSelf();
+      if (hideComments) {
+        refreshDiagnostic();
+        startSweep();
+      } else {
+        stopSweep();
+      }
+      if (showOwnOnly) {
+        startRetryUntilSelf();
+      } else {
+        stopRetry();
+      }
     } else {
       stopRetry();
+      stopSweep();
       clearMarks();
+    }
+    // Clear the diagnostic attribute on every hideComments-off path, whether
+    // or not showOwnOnly keeps the marking machinery active (otherwise a
+    // stale "hideComments=on" value would linger and mislead self-checks).
+    if (!hideComments) {
+      document.documentElement.removeAttribute('data-quietsky-replydiag');
     }
   }
 
@@ -322,10 +568,9 @@
     remarkAll();
   });
 
-  // Same-tab writes don't fire `storage`; poll lightly while own-only is on
-  // via startRetryUntilSelf, and also refresh on focus.
+  // Same-tab writes don't fire `storage`; refresh on focus while marking is on.
   window.addEventListener('focus', () => {
-    if (showOwnOnly) remarkAll();
+    if (isMarkingActive()) remarkAll();
   });
 
   load();

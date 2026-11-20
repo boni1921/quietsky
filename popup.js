@@ -1,34 +1,71 @@
-const KEYS = ['hideLikes', 'hideReposts', 'hideBookmarks', 'showOwnOnly'];
+const KEYS = [
+  'hideLikes',
+  'hideReposts',
+  'hideBookmarks',
+  'hideComments',
+  'showOwnOnly',
+  'quickReactions',
+  'autoRenewMutes',
+];
 const DEFAULTS = {
   hideLikes: true,
   hideReposts: true,
   hideBookmarks: true,
+  hideComments: true,
   showOwnOnly: false,
+  quickReactions: false,
+  autoRenewMutes: true,
+  commentWhitelist: [],
 };
 
-const statusEl = document.getElementById('status');
+const whitelistEl = document.getElementById('commentWhitelist');
+let whitelistDirty = false;
+
+/** Split the textarea into a clean, unique list of handles / DIDs. */
+function parseWhitelist(text) {
+  const seen = new Set();
+  const result = [];
+  for (const rawLine of String(text || '').split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || seen.has(line)) continue;
+    seen.add(line);
+    result.push(line);
+  }
+  return result;
+}
+
+function whitelistToText(list) {
+  return Array.isArray(list) ? list.join('\n') : '';
+}
 
 async function load() {
   const data = await chrome.storage.sync.get(DEFAULTS);
   for (const key of KEYS) {
     const el = document.getElementById(key);
-    if (key === 'showOwnOnly') {
+    if (key === 'showOwnOnly' || key === 'quickReactions') {
       el.checked = Boolean(data[key]);
     } else {
       el.checked = data[key] !== false;
     }
+  }
+  // Never clobber text the user is currently typing or has already edited.
+  if (!whitelistDirty && document.activeElement !== whitelistEl) {
+    whitelistEl.value = whitelistToText(data.commentWhitelist);
   }
 }
 
 for (const key of KEYS) {
   document.getElementById(key).addEventListener('change', async (e) => {
     await chrome.storage.sync.set({ [key]: e.target.checked });
-    statusEl.textContent = 'Saved';
-    setTimeout(() => {
-      statusEl.textContent = '';
-    }, 1200);
   });
 }
+
+whitelistEl.addEventListener('input', async () => {
+  whitelistDirty = true;
+  await chrome.storage.sync.set({
+    commentWhitelist: parseWhitelist(whitelistEl.value),
+  });
+});
 
 load();
 
